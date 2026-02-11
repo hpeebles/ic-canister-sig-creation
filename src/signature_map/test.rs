@@ -4,6 +4,8 @@ use ic_certification::hash_tree::SubtreeLookupResult::Found;
 use ic_certification::{Hash, LookupResult};
 use sha2::{Digest, Sha256};
 
+const MINUTE_NS: u64 = 60 * 1_000_000_000;
+
 fn hash_bytes(value: impl AsRef<[u8]>) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update(value.as_ref());
@@ -21,7 +23,7 @@ fn message(x: u64) -> Hash {
 #[test]
 fn test_signature_lookup() {
     let mut map = SignatureMap::default();
-    map.put(&seed(1), message(1), 10);
+    map.put(&seed(1), message(1), Some(10));
     assert_eq!(
         map.witness(&seed(1), message(1))
             .expect("failed to get a witness")
@@ -39,10 +41,10 @@ fn test_signature_lookup() {
 fn test_signature_expiration() {
     let mut map = SignatureMap::default();
 
-    map.put(&seed(1), message(1), 10);
-    map.put(&seed(1), message(2), 20);
-    map.put(&seed(2), message(1), 15);
-    map.put(&seed(2), message(2), 25);
+    map.put(&seed(1), message(1), Some(10));
+    map.put(&seed(1), message(2), Some(20));
+    map.put(&seed(2), message(1), Some(15));
+    map.put(&seed(2), message(2), Some(25));
 
     assert_eq!(2, map.prune_expired(/*time now*/ 19));
     assert!(map.witness(&seed(1), message(1)).is_none());
@@ -57,7 +59,7 @@ fn test_signature_expiration_limit() {
     let mut map = SignatureMap::default();
 
     for i in 0..100 {
-        map.put(&seed(i), message(i), 10 + i);
+        map.put(&seed(i), message(i), Some(10 + i));
     }
 
     assert_eq!(50, map.prune_expired(/*time now*/ 100));
@@ -92,7 +94,7 @@ fn test_random_modifications() {
                 rng.fill_bytes(&mut message_hash);
 
                 pairs.push((seed, message_hash));
-                map.put(seed.as_slice(), message_hash, round);
+                map.put(seed.as_slice(), message_hash, Some(round));
             }
         }
 
@@ -122,13 +124,13 @@ fn test_signatures_pruned_on_add() {
     };
 
     for i in 0..50 {
-        map.add_signature_internal(&sig_inputs, TIME_NOW + i);
+        map.add_signature_internal(&sig_inputs, Some(Duration::from_secs(60)), TIME_NOW + i);
     }
 
     assert_eq!(map.len(), 50);
 
     // Pruning timeout is one minute
-    map.add_signature_internal(&sig_inputs, TIME_NOW + 2 * MINUTE_NS);
+    map.add_signature_internal(&sig_inputs, Some(Duration::from_secs(60)), TIME_NOW + 2 * MINUTE_NS);
     assert_eq!(map.len(), 1);
 }
 
@@ -143,7 +145,7 @@ fn test_signature_round_trip() {
     };
 
     let mut map = SignatureMap::default();
-    map.add_signature_internal(&sig_inputs, TIME_NOW);
+    map.add_signature_internal(&sig_inputs, Some(Duration::from_secs(60)), TIME_NOW);
     let result = map
         .get_signature_as_cbor_internal(&sig_inputs, certificate.clone(), None)
         .expect("failed to get signature");

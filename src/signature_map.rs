@@ -8,12 +8,9 @@ use serde::Serialize;
 use serde_bytes::ByteBuf;
 use std::borrow::Cow;
 use std::collections::BinaryHeap;
+use std::time::Duration;
 use thiserror::Error;
 
-const MINUTE_NS: u64 = 60 * 1_000_000_000;
-// The expiration used for signatures.
-#[allow(clippy::identity_op)]
-const SIGNATURE_EXPIRATION_PERIOD_NS: u64 = 1 * MINUTE_NS;
 const MAX_SIGS_TO_PRUNE: usize = 50;
 pub const LABEL_SIG: &[u8] = b"sig";
 #[derive(Default)]
@@ -81,7 +78,7 @@ pub enum CanisterSigError {
 }
 
 impl SignatureMap {
-    fn put(&mut self, seed: &[u8], message_hash: Hash, signature_expires_at: u64) {
+    fn put(&mut self, seed: &[u8], message_hash: Hash, signature_expires_at: Option<u64>) {
         let seed_hash = hash_bytes(seed);
         if self.certified_map.get(&seed_hash[..]).is_none() {
             let mut submap = RbTree::new();
@@ -92,11 +89,13 @@ impl SignatureMap {
                 submap.insert(message_hash, Unit);
             });
         }
-        self.expiration_queue.push(SigExpiration {
-            seed_hash,
-            msg_hash: message_hash,
-            expires_at: signature_expires_at,
-        });
+        if let Some(expires_at) = signature_expires_at {
+            self.expiration_queue.push(SigExpiration {
+                seed_hash,
+                msg_hash: message_hash,
+                expires_at,
+            });
+        }
     }
 
     pub fn delete(&mut self, seed_hash: Hash, message_hash: Hash) {
@@ -195,14 +194,14 @@ impl SignatureMap {
     }
 
     /// Adds a signature to the map, given the signature inputs.
-    pub fn add_signature(&mut self, sig_inputs: &CanisterSigInputs) {
+    pub fn add_signature(&mut self, sig_inputs: &CanisterSigInputs, signature_expires_after: Option<Duration>) {
         let now = time();
-        self.add_signature_internal(sig_inputs, now);
+        self.add_signature_internal(sig_inputs, signature_expires_after, now);
     }
 
-    fn add_signature_internal(&mut self, sig_inputs: &CanisterSigInputs, now: u64) {
+    fn add_signature_internal(&mut self, sig_inputs: &CanisterSigInputs, signature_expires_after: Option<Duration>, now: u64) {
         self.prune_expired(now);
-        let expires_at = now.saturating_add(SIGNATURE_EXPIRATION_PERIOD_NS);
+        let expires_at = signature_expires_after.map(|d| now.saturating_add(d.as_nanos() as u64));
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
     }
 
