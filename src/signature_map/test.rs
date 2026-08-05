@@ -130,7 +130,11 @@ fn test_signatures_pruned_on_add() {
     assert_eq!(map.len(), 50);
 
     // Pruning timeout is one minute
-    map.add_signature_internal(&sig_inputs, Some(Duration::from_secs(60)), TIME_NOW + 2 * MINUTE_NS);
+    map.add_signature_internal(
+        &sig_inputs,
+        Some(Duration::from_secs(60)),
+        TIME_NOW + 2 * MINUTE_NS,
+    );
     assert_eq!(map.len(), 1);
 }
 

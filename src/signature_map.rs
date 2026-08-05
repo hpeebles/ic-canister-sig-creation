@@ -1,35 +1,73 @@
 //! Maintains signatures with associated expirations.
 use crate::{hash_bytes, hash_with_domain, CanisterSig};
 use ic0::time;
-use ic_certification::{
-    fork, labeled, leaf, leaf_hash, pruned, AsHashTree, Hash, HashTree, RbTree,
-};
+use ic_certification::{fork, labeled, pruned, Hash, HashTree};
 use serde::Serialize;
 use serde_bytes::ByteBuf;
-use std::borrow::Cow;
-use std::collections::BinaryHeap;
 use std::time::Duration;
 use thiserror::Error;
 
+mod heap;
+
+pub use heap::{HeapExpirationQueue, HeapSignatureStore};
+
 const MAX_SIGS_TO_PRUNE: usize = 50;
 pub const LABEL_SIG: &[u8] = b"sig";
-#[derive(Default)]
-struct Unit;
 
-impl AsHashTree for Unit {
-    fn root_hash(&self) -> Hash {
-        leaf_hash(&b""[..])
-    }
-    fn as_hash_tree(&self) -> HashTree {
-        leaf(Cow::from(&b""[..]))
-    }
+/// A certified store of `(seed_hash, message_hash)` pairs.
+///
+/// Beyond plain insertion and deletion, implementations must be able to certify
+/// their contents: [root_hash](SignatureStore::root_hash) returns the root of a
+/// hash tree containing every stored pair at path `/<seed_hash>/<message_hash>`,
+/// and [witness](SignatureStore::witness) proves the presence of a single pair
+/// against that root.
+///
+/// Different implementations may produce differently shaped hash trees for the
+/// same contents (and therefore different root hashes); a witness is only valid
+/// against the root hash of the store that produced it.
+pub trait SignatureStore {
+    /// Inserts the given pair into the store. Inserting an already present pair
+    /// is a no-op.
+    fn insert(&mut self, seed_hash: Hash, message_hash: Hash);
+
+    /// Deletes the given pair from the store. Deleting an absent pair is a no-op.
+    fn delete(&mut self, seed_hash: Hash, message_hash: Hash);
+
+    /// Returns whether the given pair is present in the store.
+    fn contains(&self, seed_hash: &Hash, message_hash: &Hash) -> bool;
+
+    /// The root hash of the store's hash tree, i.e. the hash to certify
+    /// (after wrapping with the [LABEL_SIG] label).
+    fn root_hash(&self) -> Hash;
+
+    /// A hash tree proving the presence of `/<seed_hash>/<message_hash>` in this
+    /// store, with all other content pruned. Its digest equals
+    /// [root_hash](SignatureStore::root_hash). Returns `None` if the pair is not
+    /// present.
+    fn witness(&self, seed_hash: &Hash, message_hash: &Hash) -> Option<HashTree>;
 }
 
-#[derive(PartialEq, Eq)]
-struct SigExpiration {
-    expires_at: u64,
-    seed_hash: Hash,
-    msg_hash: Hash,
+/// A priority queue of signature expirations, ordered by ascending expiration time.
+pub trait ExpirationQueue {
+    /// Adds an entry to the queue. The same `(seed_hash, message_hash)` pair may
+    /// be queued multiple times with different expiration times.
+    fn push(&mut self, expires_at: u64, seed_hash: Hash, message_hash: Hash);
+
+    /// The expiration time of the earliest-expiring entry, or `None` if the
+    /// queue is empty.
+    fn peek_expires_at(&self) -> Option<u64>;
+
+    /// Removes and returns the earliest-expiring entry, or `None` if the queue
+    /// is empty.
+    fn pop(&mut self) -> Option<(Hash, Hash)>;
+
+    /// The number of queued entries.
+    fn len(&self) -> usize;
+
+    /// Returns whether the queue is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Inputs to create and retrieve a canister signature.
@@ -49,24 +87,26 @@ impl CanisterSigInputs<'_> {
     }
 }
 
-impl Ord for SigExpiration {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // BinaryHeap is a max heap, but we want expired entries
-        // first, hence the inversed order.
-        other.expires_at.cmp(&self.expires_at)
-    }
+/// Maintains canister signatures with associated expirations.
+///
+/// The store holding the signatures and the queue tracking their expirations are
+/// pluggable: the defaults ([HeapSignatureStore] and [HeapExpirationQueue]) keep
+/// all data on the heap, while alternative implementations of [SignatureStore]
+/// and [ExpirationQueue] can keep it elsewhere, e.g. in stable memory.
+pub struct SignatureMap<S = HeapSignatureStore, Q = HeapExpirationQueue> {
+    store: S,
+    expiration_queue: Q,
 }
 
-impl PartialOrd for SigExpiration {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+// Implemented manually (rather than derived) so that it only exists for the
+// default type parameters, which lets `SignatureMap::default()` infer them.
+impl Default for SignatureMap {
+    fn default() -> Self {
+        Self::new(
+            HeapSignatureStore::default(),
+            HeapExpirationQueue::default(),
+        )
     }
-}
-
-#[derive(Default)]
-pub struct SignatureMap {
-    certified_map: RbTree<Hash, RbTree<Hash, Unit>>,
-    expiration_queue: BinaryHeap<SigExpiration>,
 }
 
 #[derive(Error, Debug)]
@@ -77,36 +117,26 @@ pub enum CanisterSigError {
     NoSignature,
 }
 
-impl SignatureMap {
+impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
+    /// Creates a signature map backed by the given store and expiration queue.
+    pub fn new(store: S, expiration_queue: Q) -> Self {
+        Self {
+            store,
+            expiration_queue,
+        }
+    }
+
     fn put(&mut self, seed: &[u8], message_hash: Hash, signature_expires_at: Option<u64>) {
         let seed_hash = hash_bytes(seed);
-        if self.certified_map.get(&seed_hash[..]).is_none() {
-            let mut submap = RbTree::new();
-            submap.insert(message_hash, Unit);
-            self.certified_map.insert(seed_hash, submap);
-        } else {
-            self.certified_map.modify(&seed_hash[..], |submap| {
-                submap.insert(message_hash, Unit);
-            });
-        }
+        self.store.insert(seed_hash, message_hash);
         if let Some(expires_at) = signature_expires_at {
-            self.expiration_queue.push(SigExpiration {
-                seed_hash,
-                msg_hash: message_hash,
-                expires_at,
-            });
+            self.expiration_queue
+                .push(expires_at, seed_hash, message_hash);
         }
     }
 
     pub fn delete(&mut self, seed_hash: Hash, message_hash: Hash) {
-        let mut is_empty = false;
-        self.certified_map.modify(&seed_hash[..], |m| {
-            m.delete(&message_hash[..]);
-            is_empty = m.is_empty();
-        });
-        if is_empty {
-            self.certified_map.delete(&seed_hash[..]);
-        }
+        self.store.delete(seed_hash, message_hash);
     }
 
     /// Removes a batch of expired signatures from the signature map.
@@ -124,15 +154,15 @@ impl SignatureMap {
         let mut num_pruned = 0;
 
         for _step in 0..MAX_SIGS_TO_PRUNE {
-            if let Some(expiration) = self.expiration_queue.peek() {
-                if expiration.expires_at > now {
-                    return num_pruned;
+            match self.expiration_queue.peek_expires_at() {
+                Some(expires_at) if expires_at <= now => {
+                    if let Some((seed_hash, message_hash)) = self.expiration_queue.pop() {
+                        self.delete(seed_hash, message_hash);
+                    }
+                    num_pruned += 1;
                 }
+                _ => return num_pruned,
             }
-            if let Some(expiration) = self.expiration_queue.pop() {
-                self.delete(expiration.seed_hash, expiration.msg_hash);
-            }
-            num_pruned += 1;
         }
 
         num_pruned
@@ -194,17 +224,28 @@ impl SignatureMap {
     }
 
     /// Adds a signature to the map, given the signature inputs.
-    pub fn add_signature(&mut self, sig_inputs: &CanisterSigInputs, signature_expires_after: Option<Duration>) {
+    pub fn add_signature(
+        &mut self,
+        sig_inputs: &CanisterSigInputs,
+        signature_expires_after: Option<Duration>,
+    ) {
         let now = time();
         self.add_signature_internal(sig_inputs, signature_expires_after, now);
     }
 
-    fn add_signature_internal(&mut self, sig_inputs: &CanisterSigInputs, signature_expires_after: Option<Duration>, now: u64) {
+    fn add_signature_internal(
+        &mut self,
+        sig_inputs: &CanisterSigInputs,
+        signature_expires_after: Option<Duration>,
+        now: u64,
+    ) {
         self.prune_expired(now);
         let expires_at = signature_expires_after.map(|d| now.saturating_add(d.as_nanos() as u64));
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
     }
 
+    /// The number of queued signature expirations. Note that signatures added
+    /// without an expiration are not counted.
     pub fn len(&self) -> usize {
         self.expiration_queue.len()
     }
@@ -214,18 +255,11 @@ impl SignatureMap {
     }
 
     pub fn root_hash(&self) -> Hash {
-        self.certified_map.root_hash()
+        self.store.root_hash()
     }
 
     pub fn witness(&self, seed: &[u8], message_hash: Hash) -> Option<HashTree> {
-        let seed_hash = hash_bytes(seed);
-        self.certified_map
-            .get(&seed_hash[..])?
-            .get(&message_hash[..])?;
-        let witness = self
-            .certified_map
-            .nested_witness(&seed_hash[..], |nested| nested.witness(&message_hash[..]));
-        Some(witness)
+        self.store.witness(&hash_bytes(seed), &message_hash)
     }
 }
 
