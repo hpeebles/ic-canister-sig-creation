@@ -244,6 +244,17 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
     }
 
+    /// The store holding the signatures, for a caller that needs to inspect
+    /// it — e.g. to report metrics about the memory it occupies.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// The expiration queue, for the same reason as [Self::store].
+    pub fn expiration_queue(&self) -> &Q {
+        &self.expiration_queue
+    }
+
     /// The number of queued signature expirations. Note that signatures added
     /// without an expiration are not counted.
     pub fn len(&self) -> usize {
