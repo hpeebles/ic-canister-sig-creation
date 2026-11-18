@@ -33,14 +33,14 @@ pub trait SignatureStore {
     /// Deletes the given pair from the store. Deleting an absent pair is a no-op.
     fn delete(&mut self, seed_hash: Hash, message_hash: Hash);
 
-    /// Puts `message_hash` in place of `superseded` under `seed_hash`, leaving
-    /// what deleting the one and then inserting the other leaves. The default
-    /// does exactly that; a store that can make the change in a single write
-    /// of its tree, where each of those rewrites the path to the root,
-    /// overrides it.
-    fn replace(&mut self, seed_hash: Hash, superseded: Hash, message_hash: Hash) {
-        self.delete(seed_hash, superseded);
-        self.insert(seed_hash, message_hash);
+    /// Puts `new_message_hash` in place of `previous_message_hash` under
+    /// `seed_hash`, leaving what deleting the one and then inserting the other
+    /// leaves. The default does exactly that; a store that can make the
+    /// change in a single write of its tree, where each of those rewrites the
+    /// path to the root, overrides it.
+    fn replace(&mut self, seed_hash: Hash, previous_message_hash: Hash, new_message_hash: Hash) {
+        self.delete(seed_hash, previous_message_hash);
+        self.insert(seed_hash, new_message_hash);
     }
 
     /// Returns whether the given pair is present in the store.
@@ -254,29 +254,29 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
     }
 
-    /// Adds the signature for `message` in place of the one for
-    /// `superseded_message`, both in `domain` and under `seed`. It leaves the
+    /// Adds the signature for `new_message` in place of the one for
+    /// `previous_message`, both in `domain` and under `seed`. It leaves the
     /// signatures and expirations that [Self::delete] of the one followed by
     /// [Self::add_signature] of the other leaves, expired signatures pruned
     /// along the way, with the store making the change in one step
     /// ([SignatureStore::replace]).
     ///
-    /// As with [Self::delete], an expiration queued for the superseded
+    /// As with [Self::delete], an expiration queued for the previous
     /// signature stays queued.
     pub fn replace_signature(
         &mut self,
         domain: &[u8],
         seed: &[u8],
-        superseded_message: &[u8],
-        message: &[u8],
+        previous_message: &[u8],
+        new_message: &[u8],
         signature_expires_after: Option<Duration>,
     ) {
         let now = time();
         self.replace_signature_internal(
             domain,
             seed,
-            superseded_message,
-            message,
+            previous_message,
+            new_message,
             signature_expires_after,
             now,
         );
@@ -286,24 +286,24 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         &mut self,
         domain: &[u8],
         seed: &[u8],
-        superseded_message: &[u8],
-        message: &[u8],
+        previous_message: &[u8],
+        new_message: &[u8],
         signature_expires_after: Option<Duration>,
         now: u64,
     ) {
         self.prune_expired(now);
         let seed_hash = hash_bytes(seed);
-        let message_hash = hash_with_domain(domain, message);
+        let new_message_hash = hash_with_domain(domain, new_message);
         self.store.replace(
             seed_hash,
-            hash_with_domain(domain, superseded_message),
-            message_hash,
+            hash_with_domain(domain, previous_message),
+            new_message_hash,
         );
         if let Some(expires_after) = signature_expires_after {
             self.expiration_queue.push(
                 now.saturating_add(expires_after.as_nanos() as u64),
                 seed_hash,
-                message_hash,
+                new_message_hash,
             );
         }
     }
