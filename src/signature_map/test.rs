@@ -209,6 +209,23 @@ fn test_replace_signature_prunes_and_expires() {
 }
 
 #[test]
+fn test_replace_signature_with_one_whose_expiry_has_passed() {
+    const TIME_NOW: u64 = 100;
+    let mut map = SignatureMap::default();
+    let first = sig_inputs(&[1], &[1]);
+    let second = sig_inputs(&[1], &[2]);
+    map.add_signature_internal(&first, None, TIME_NOW);
+    map.add_signature_internal(&second, Some(Duration::from_secs(60)), TIME_NOW);
+
+    // The pruning takes `second` out and the replacing puts it back, held
+    // from now on with no expiry.
+    map.replace_signature_internal(&first, &second, None, TIME_NOW + 2 * MINUTE_NS);
+    assert!(map.witness(first.seed, first.message_hash()).is_none());
+    assert!(map.witness(second.seed, second.message_hash()).is_some());
+    assert_eq!(map.len(), 0);
+}
+
+#[test]
 fn test_signature_round_trip() {
     const TIME_NOW: u64 = 100;
     let certificate = vec![1u8, 2, 3];

@@ -157,7 +157,7 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
     ///
     /// Pruning the signature map also requires updating the `certified_data`
     /// with the new root hash. Therefore, this function is only called by [add_signature]
-    /// which requires updating the `certified_data` as well. This avoids the risk
+    /// and [replace_signature], which require updating the `certified_data` as well. This avoids the risk
     /// of clients forgetting to update `certified_data` as it would be a bug even
     /// without pruning.
     fn prune_expired(&mut self, now: u64) -> usize {
@@ -255,10 +255,11 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
     }
 
     /// Adds the signature for `sig_inputs` in place of the one for
-    /// `superseded`: what [Self::delete] of the one followed by
-    /// [Self::add_signature] of the other does, expired signatures pruned
-    /// along the way. Under the same seed the store makes the change in one
-    /// step ([SignatureStore::replace]).
+    /// `superseded`. It leaves the signatures and expirations that
+    /// [Self::delete] of the one followed by [Self::add_signature] of the
+    /// other leaves, expired signatures pruned along the way. Under the same
+    /// seed the store makes the change in one step
+    /// ([SignatureStore::replace]).
     ///
     /// As with [Self::delete], an expiration queued for `superseded` stays
     /// queued.
