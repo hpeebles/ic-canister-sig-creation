@@ -138,73 +138,76 @@ fn test_signatures_pruned_on_add() {
     assert_eq!(map.len(), 1);
 }
 
-fn sig_inputs(seed: &'static [u8], message: &'static [u8]) -> CanisterSigInputs<'static> {
-    CanisterSigInputs {
-        domain: b"ic-request-auth-delegation",
+const DOMAIN: &[u8] = b"ic-request-auth-delegation";
+
+fn add(map: &mut SignatureMap, seed: &[u8], message: &[u8], expires: Option<Duration>, now: u64) {
+    let sig_inputs = CanisterSigInputs {
+        domain: DOMAIN,
         seed,
         message,
-    }
+    };
+    map.add_signature_internal(&sig_inputs, expires, now);
+}
+
+fn held(map: &SignatureMap, seed: &[u8], message: &[u8]) -> bool {
+    map.witness(seed, hash_with_domain(DOMAIN, message))
+        .is_some()
 }
 
 #[test]
 fn test_replace_signature() {
     const TIME_NOW: u64 = 100;
     let mut map = SignatureMap::default();
-    let first = sig_inputs(&[1], &[1]);
-    let second = sig_inputs(&[1], &[2]);
-    let under_another_seed = sig_inputs(&[2], &[3]);
-    let held = |map: &SignatureMap, inputs: &CanisterSigInputs| {
-        map.witness(inputs.seed, inputs.message_hash()).is_some()
-    };
-    map.add_signature_internal(&first, None, TIME_NOW);
+    add(&mut map, &[1], &[1], None, TIME_NOW);
+    add(&mut map, &[2], &[1], None, TIME_NOW);
 
-    map.replace_signature_internal(&first, &second, None, TIME_NOW);
-    assert!(!held(&map, &first));
-    assert!(held(&map, &second));
+    map.replace_signature_internal(DOMAIN, &[1], &[1], &[2], None, TIME_NOW);
+    assert!(!held(&map, &[1], &[1]));
+    assert!(held(&map, &[1], &[2]));
+    // The same message under another seed is another signature.
+    assert!(held(&map, &[2], &[1]));
 
-    map.replace_signature_internal(&second, &under_another_seed, None, TIME_NOW);
-    assert!(!held(&map, &second));
-    assert!(held(&map, &under_another_seed));
-
-    // What a map that only ever held the last one certifies.
+    // What a map that only ever held these two certifies.
     let mut added = SignatureMap::default();
-    added.add_signature_internal(&under_another_seed, None, TIME_NOW);
+    add(&mut added, &[1], &[2], None, TIME_NOW);
+    add(&mut added, &[2], &[1], None, TIME_NOW);
     assert_eq!(map.root_hash(), added.root_hash());
 
     // One that isn't held is replaced all the same.
-    map.replace_signature_internal(&first, &second, None, TIME_NOW);
-    assert!(held(&map, &second));
-    assert!(held(&map, &under_another_seed));
+    map.replace_signature_internal(DOMAIN, &[1], &[9], &[3], None, TIME_NOW);
+    assert!(held(&map, &[1], &[2]));
+    assert!(held(&map, &[1], &[3]));
 }
 
 #[test]
 fn test_replace_signature_prunes_and_expires() {
     const TIME_NOW: u64 = 100;
     let mut map = SignatureMap::default();
-    let expiring = sig_inputs(&[9], &[9]);
-    let first = sig_inputs(&[1], &[1]);
-    let second = sig_inputs(&[1], &[2]);
-    let third = sig_inputs(&[1], &[3]);
-    let held = |map: &SignatureMap, inputs: &CanisterSigInputs| {
-        map.witness(inputs.seed, inputs.message_hash()).is_some()
-    };
-    map.add_signature_internal(&expiring, Some(Duration::from_secs(60)), TIME_NOW);
-    map.add_signature_internal(&first, None, TIME_NOW);
+    add(
+        &mut map,
+        &[9],
+        &[9],
+        Some(Duration::from_secs(60)),
+        TIME_NOW,
+    );
+    add(&mut map, &[1], &[1], None, TIME_NOW);
 
     // Replacing prunes what has expired, and queues the new one's expiry.
     map.replace_signature_internal(
-        &first,
-        &second,
+        DOMAIN,
+        &[1],
+        &[1],
+        &[2],
         Some(Duration::from_secs(60)),
         TIME_NOW + 2 * MINUTE_NS,
     );
-    assert!(!held(&map, &expiring));
-    assert!(held(&map, &second));
+    assert!(!held(&map, &[9], &[9]));
+    assert!(held(&map, &[1], &[2]));
     assert_eq!(map.len(), 1);
 
-    map.replace_signature_internal(&first, &third, None, TIME_NOW + 4 * MINUTE_NS);
-    assert!(!held(&map, &second));
-    assert!(held(&map, &third));
+    map.replace_signature_internal(DOMAIN, &[1], &[1], &[3], None, TIME_NOW + 4 * MINUTE_NS);
+    assert!(!held(&map, &[1], &[2]));
+    assert!(held(&map, &[1], &[3]));
     assert_eq!(map.len(), 0);
 }
 
@@ -212,16 +215,20 @@ fn test_replace_signature_prunes_and_expires() {
 fn test_replace_signature_with_one_whose_expiry_has_passed() {
     const TIME_NOW: u64 = 100;
     let mut map = SignatureMap::default();
-    let first = sig_inputs(&[1], &[1]);
-    let second = sig_inputs(&[1], &[2]);
-    map.add_signature_internal(&first, None, TIME_NOW);
-    map.add_signature_internal(&second, Some(Duration::from_secs(60)), TIME_NOW);
+    add(&mut map, &[1], &[1], None, TIME_NOW);
+    add(
+        &mut map,
+        &[1],
+        &[2],
+        Some(Duration::from_secs(60)),
+        TIME_NOW,
+    );
 
-    // The pruning takes `second` out and the replacing puts it back, held
+    // The pruning takes the second out and the replacing puts it back, held
     // from now on with no expiry.
-    map.replace_signature_internal(&first, &second, None, TIME_NOW + 2 * MINUTE_NS);
-    assert!(map.witness(first.seed, first.message_hash()).is_none());
-    assert!(map.witness(second.seed, second.message_hash()).is_some());
+    map.replace_signature_internal(DOMAIN, &[1], &[1], &[2], None, TIME_NOW + 2 * MINUTE_NS);
+    assert!(!held(&map, &[1], &[1]));
+    assert!(held(&map, &[1], &[2]));
     assert_eq!(map.len(), 0);
 }
 

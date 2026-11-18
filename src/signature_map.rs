@@ -254,46 +254,57 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
     }
 
-    /// Adds the signature for `sig_inputs` in place of the one for
-    /// `superseded`. It leaves the signatures and expirations that
-    /// [Self::delete] of the one followed by [Self::add_signature] of the
-    /// other leaves, expired signatures pruned along the way. Under the same
-    /// seed the store makes the change in one step
+    /// Adds the signature for `message` in place of the one for
+    /// `superseded_message`, both in `domain` and under `seed`. It leaves the
+    /// signatures and expirations that [Self::delete] of the one followed by
+    /// [Self::add_signature] of the other leaves, expired signatures pruned
+    /// along the way, with the store making the change in one step
     /// ([SignatureStore::replace]).
     ///
-    /// As with [Self::delete], an expiration queued for `superseded` stays
-    /// queued.
+    /// As with [Self::delete], an expiration queued for the superseded
+    /// signature stays queued.
     pub fn replace_signature(
         &mut self,
-        superseded: &CanisterSigInputs,
-        sig_inputs: &CanisterSigInputs,
+        domain: &[u8],
+        seed: &[u8],
+        superseded_message: &[u8],
+        message: &[u8],
         signature_expires_after: Option<Duration>,
     ) {
         let now = time();
-        self.replace_signature_internal(superseded, sig_inputs, signature_expires_after, now);
+        self.replace_signature_internal(
+            domain,
+            seed,
+            superseded_message,
+            message,
+            signature_expires_after,
+            now,
+        );
     }
 
     fn replace_signature_internal(
         &mut self,
-        superseded: &CanisterSigInputs,
-        sig_inputs: &CanisterSigInputs,
+        domain: &[u8],
+        seed: &[u8],
+        superseded_message: &[u8],
+        message: &[u8],
         signature_expires_after: Option<Duration>,
         now: u64,
     ) {
         self.prune_expired(now);
-        let expires_at = signature_expires_after.map(|d| now.saturating_add(d.as_nanos() as u64));
-        if superseded.seed != sig_inputs.seed {
-            self.delete(hash_bytes(superseded.seed), superseded.message_hash());
-            self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
-            return;
-        }
-        let seed_hash = hash_bytes(sig_inputs.seed);
-        let message_hash = sig_inputs.message_hash();
-        self.store
-            .replace(seed_hash, superseded.message_hash(), message_hash);
-        if let Some(expires_at) = expires_at {
-            self.expiration_queue
-                .push(expires_at, seed_hash, message_hash);
+        let seed_hash = hash_bytes(seed);
+        let message_hash = hash_with_domain(domain, message);
+        self.store.replace(
+            seed_hash,
+            hash_with_domain(domain, superseded_message),
+            message_hash,
+        );
+        if let Some(expires_after) = signature_expires_after {
+            self.expiration_queue.push(
+                now.saturating_add(expires_after.as_nanos() as u64),
+                seed_hash,
+                message_hash,
+            );
         }
     }
 
