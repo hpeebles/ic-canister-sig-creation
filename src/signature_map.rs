@@ -33,6 +33,16 @@ pub trait SignatureStore {
     /// Deletes the given pair from the store. Deleting an absent pair is a no-op.
     fn delete(&mut self, seed_hash: Hash, message_hash: Hash);
 
+    /// Puts `message_hash` in place of `superseded` under `seed_hash`, leaving
+    /// what deleting the one and then inserting the other leaves. The default
+    /// does exactly that; a store that can make the change in a single write
+    /// of its tree, where each of those rewrites the path to the root,
+    /// overrides it.
+    fn replace(&mut self, seed_hash: Hash, superseded: Hash, message_hash: Hash) {
+        self.delete(seed_hash, superseded);
+        self.insert(seed_hash, message_hash);
+    }
+
     /// Returns whether the given pair is present in the store.
     fn contains(&self, seed_hash: &Hash, message_hash: &Hash) -> bool;
 
@@ -242,6 +252,48 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         self.prune_expired(now);
         let expires_at = signature_expires_after.map(|d| now.saturating_add(d.as_nanos() as u64));
         self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
+    }
+
+    /// Adds the signature for `sig_inputs` in place of the one for
+    /// `superseded`: what [Self::delete] of the one followed by
+    /// [Self::add_signature] of the other does, expired signatures pruned
+    /// along the way. Under the same seed the store makes the change in one
+    /// step ([SignatureStore::replace]).
+    ///
+    /// As with [Self::delete], an expiration queued for `superseded` stays
+    /// queued.
+    pub fn replace_signature(
+        &mut self,
+        superseded: &CanisterSigInputs,
+        sig_inputs: &CanisterSigInputs,
+        signature_expires_after: Option<Duration>,
+    ) {
+        let now = time();
+        self.replace_signature_internal(superseded, sig_inputs, signature_expires_after, now);
+    }
+
+    fn replace_signature_internal(
+        &mut self,
+        superseded: &CanisterSigInputs,
+        sig_inputs: &CanisterSigInputs,
+        signature_expires_after: Option<Duration>,
+        now: u64,
+    ) {
+        self.prune_expired(now);
+        let expires_at = signature_expires_after.map(|d| now.saturating_add(d.as_nanos() as u64));
+        if superseded.seed != sig_inputs.seed {
+            self.delete(hash_bytes(superseded.seed), superseded.message_hash());
+            self.put(sig_inputs.seed, sig_inputs.message_hash(), expires_at);
+            return;
+        }
+        let seed_hash = hash_bytes(sig_inputs.seed);
+        let message_hash = sig_inputs.message_hash();
+        self.store
+            .replace(seed_hash, superseded.message_hash(), message_hash);
+        if let Some(expires_at) = expires_at {
+            self.expiration_queue
+                .push(expires_at, seed_hash, message_hash);
+        }
     }
 
     /// The store holding the signatures, for a caller that needs to inspect
