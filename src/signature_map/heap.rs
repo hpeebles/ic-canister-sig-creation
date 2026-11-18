@@ -47,6 +47,21 @@ impl SignatureStore for HeapSignatureStore {
         }
     }
 
+    /// One descent to the seed, whose messages are changed where they sit:
+    /// with the new message put in as the previous one goes, the seed is
+    /// never left empty, so it is neither removed nor added back.
+    fn replace(&mut self, seed_hash: Hash, previous_message_hash: Hash, new_message_hash: Hash) {
+        let mut seed_found = false;
+        self.certified_map.modify(&seed_hash[..], |submap| {
+            seed_found = true;
+            submap.delete(&previous_message_hash[..]);
+            submap.insert(new_message_hash, Unit);
+        });
+        if !seed_found {
+            self.insert(seed_hash, new_message_hash);
+        }
+    }
+
     fn contains(&self, seed_hash: &Hash, message_hash: &Hash) -> bool {
         self.certified_map
             .get(&seed_hash[..])

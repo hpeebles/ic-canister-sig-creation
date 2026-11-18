@@ -180,6 +180,37 @@ fn test_replace_signature() {
 }
 
 #[test]
+fn test_replace_leaves_what_delete_then_insert_leaves() {
+    use rand::prelude::*;
+
+    let mut rng = rand::rng();
+    let mut replaced = HeapSignatureStore::default();
+    let mut rewritten = HeapSignatureStore::default();
+    for _ in 0..500 {
+        let seed_hash = seed(rng.random_range(0..4));
+        let previous = message(rng.random_range(0..4));
+        let new = message(rng.random_range(0..4));
+        if rng.random_bool(0.25) {
+            replaced.delete(seed_hash, previous);
+            rewritten.delete(seed_hash, previous);
+        } else {
+            replaced.replace(seed_hash, previous, new);
+            rewritten.delete(seed_hash, previous);
+            rewritten.insert(seed_hash, new);
+        }
+        for s in (0..4).map(seed) {
+            for m in (0..4).map(message) {
+                let witness = replaced.witness(&s, &m);
+                assert_eq!(witness.is_some(), rewritten.contains(&s, &m));
+                if let Some(witness) = witness {
+                    assert_eq!(witness.digest(), replaced.root_hash());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_replace_signature_prunes_and_expires() {
     const TIME_NOW: u64 = 100;
     let mut map = SignatureMap::default();

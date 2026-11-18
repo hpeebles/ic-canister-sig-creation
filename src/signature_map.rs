@@ -35,9 +35,9 @@ pub trait SignatureStore {
 
     /// Puts `new_message_hash` in place of `previous_message_hash` under
     /// `seed_hash`, leaving what deleting the one and then inserting the other
-    /// leaves. The default does exactly that; a store that can make the
-    /// change in a single write of its tree, where each of those rewrites the
-    /// path to the root, overrides it.
+    /// leaves. The default does exactly that, which is two descents of the
+    /// store's tree or more; a store that can make the change in one
+    /// overrides it.
     fn replace(&mut self, seed_hash: Hash, previous_message_hash: Hash, new_message_hash: Hash) {
         self.delete(seed_hash, previous_message_hash);
         self.insert(seed_hash, new_message_hash);
