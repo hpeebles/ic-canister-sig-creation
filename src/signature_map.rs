@@ -250,6 +250,15 @@ impl<S: SignatureStore, Q: ExpirationQueue> SignatureMap<S, Q> {
         &self.store
     }
 
+    /// The store, for a caller whose store can do more than this map asks of
+    /// it — e.g. replace one signature with another in a single write. What
+    /// is changed through it bypasses the expiration queue: an entry removed
+    /// leaves its queued expiration behind, which then deletes nothing, and
+    /// one added is held until it is deleted.
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
+
     /// The expiration queue, for the same reason as [Self::store].
     pub fn expiration_queue(&self) -> &Q {
         &self.expiration_queue
